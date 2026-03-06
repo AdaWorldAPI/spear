@@ -45,4 +45,4 @@
 pub mod imap;
 pub mod messages;
 
-pub use messages::{MessageQuery, SearchCriteria};
+pub use messages::{MessageQuery, SearchCriteria, Search, FlagSearch, SizeSearch};

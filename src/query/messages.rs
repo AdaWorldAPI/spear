@@ -8,6 +8,7 @@ use arrow::array::*;
 use arrow::record_batch::RecordBatch;
 use datafusion::prelude::*;
 use datafusion::datasource::MemTable;
+use datafusion::functions_aggregate::expr_fn::{count, max};
 use std::sync::Arc;
 
 /// Message query executor
@@ -217,7 +218,7 @@ impl MessageQuery {
 
 /// DataFusion array_has (array_contains)
 fn array_has(array: Expr, element: Expr) -> Expr {
-    datafusion::functions_array::expr_fn::array_has(array, element)
+    datafusion::functions_nested::expr_fn::array_has(array, element)
 }
 
 /// IMAP SEARCH criteria
@@ -242,4 +243,33 @@ pub struct SearchCriteria {
     pub larger: Option<i64>,
     pub smaller: Option<i64>,
     pub uid_set: Option<Vec<u32>>,
+}
+
+/// Flag search criteria (used by IMAP parser)
+#[derive(Default, Debug, Clone)]
+pub struct FlagSearch {
+    pub seen: Option<bool>,
+    pub flagged: Option<bool>,
+    pub answered: Option<bool>,
+    pub deleted: Option<bool>,
+    pub draft: Option<bool>,
+}
+
+/// Size search criteria
+#[derive(Default, Debug, Clone)]
+pub struct SizeSearch {
+    pub larger: Option<i64>,
+    pub smaller: Option<i64>,
+}
+
+/// Structured search (used by IMAP parser)
+#[derive(Default, Debug, Clone)]
+pub struct Search {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub subject: Option<String>,
+    pub since: Option<i64>,
+    pub before: Option<i64>,
+    pub flags: FlagSearch,
+    pub size: SizeSearch,
 }
