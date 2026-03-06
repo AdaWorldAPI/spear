@@ -1,0 +1,72 @@
+{
+  "project": "spear",
+  "phase": "1.0",
+  "phase_name": "Core Storage",
+  "status": "ready",
+  "last_updated": "2026-03-06",
+  
+  "completed": [
+    "Repository structure",
+    "Schema definitions (messages, folders, accounts, events, contacts)",
+    "DataFusion expression builders",
+    "IMAP SEARCH parser",
+    "Content store (SHA256-addressed)",
+    "Architecture documentation",
+    "Integration plan"
+  ],
+  
+  "current_focus": [
+    "Verify LanceDB 0.23 compilation",
+    "Verify DataFusion 49 array functions",
+    "Implement write operations",
+    "Integration tests"
+  ],
+  
+  "blockers": [],
+  
+  "decisions": [
+    {
+      "id": "D001",
+      "topic": "Storage approach",
+      "decision": "Columnar (Lance) not KV",
+      "rationale": "KV wastes Lance's columnar compression. Proper typed columns enable predicate pushdown.",
+      "timestamp": "2026-03-06"
+    },
+    {
+      "id": "D002", 
+      "topic": "Query layer",
+      "decision": "DataFusion Expr, not SQL strings",
+      "rationale": "Type-safe, composable, optimizable, no SQL injection",
+      "timestamp": "2026-03-06"
+    },
+    {
+      "id": "D003",
+      "topic": "Body storage",
+      "decision": "Separate content store (SHA256-addressed)",
+      "rationale": "Bodies are large, opaque, read-once. Columnar doesn't help. Dedup via content-addressing.",
+      "timestamp": "2026-03-06"
+    }
+  ],
+  
+  "architecture_invariants": [
+    "No SQL strings - DataFusion Expr only",
+    "No opaque binary blobs in Lance tables",
+    "No JSON anywhere",
+    "Column pruning on every query",
+    "Predicate pushdown to Lance"
+  ],
+  
+  "key_files": {
+    "schemas": "src/schema/",
+    "query": "src/query/",
+    "content": "src/content/",
+    "docs": "docs/"
+  },
+  
+  "metrics": {
+    "tables_defined": 5,
+    "columns_total": 80,
+    "tests_passing": 0,
+    "lines_of_code": 1143
+  }
+}
