@@ -1,0 +1,31 @@
+[package]
+name = "spear"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Columnar mail server on Lance. IMAP/JMAP/CalDAV/CardDAV."
+repository = "https://github.com/AdaWorldAPI/spear"
+
+[dependencies]
+# Arrow + Lance
+arrow = { version = "56", features = ["prettyprint"] }
+lancedb = "0.23"
+datafusion = "49"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Crypto
+sha2 = "0.10"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
