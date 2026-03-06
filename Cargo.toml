@@ -7,10 +7,11 @@ description = "Columnar mail server on Lance. IMAP/JMAP/CalDAV/CardDAV."
 repository = "https://github.com/AdaWorldAPI/spear"
 
 [dependencies]
-# Arrow + Lance
+# Arrow + Lance + DataFusion
 arrow = { version = "56", features = ["prettyprint"] }
 lancedb = "0.23"
 datafusion = "49"
+datafusion-functions-array = "49"
 
 # Async
 tokio = { version = "1", features = ["full"] }

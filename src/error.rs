@@ -7,6 +7,9 @@ pub enum Error {
     #[error("Lance: {0}")]
     Lance(String),
     
+    #[error("DataFusion: {0}")]
+    DataFusion(String),
+    
     #[error("IO: {0}")]
     Io(#[from] std::io::Error),
     

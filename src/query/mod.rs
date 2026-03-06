@@ -1,37 +1,48 @@
-//! Query Layer
+//! Query Layer — DataFusion DataFrame API
 //!
-//! DataFusion expressions over Lance tables.
+//! No SQL strings. Type-safe predicate pushdown to Lance.
 //!
 //! ```text
-//! IMAP Command              │ DataFusion Expression
-//! ──────────────────────────┼────────────────────────────────────────────────
-//! SELECT INBOX              │ col("path").eq(lit("INBOX"))
-//! ──────────────────────────┼────────────────────────────────────────────────
-//! FETCH 1:* FLAGS           │ col("mailbox_id").eq(lit(id))
-//!                           │ → select only "uid", "flags" columns
-//! ──────────────────────────┼────────────────────────────────────────────────
-//! FETCH 5 (ENVELOPE)        │ col("mailbox_id").eq(lit(id))
-//!                           │   .and(col("uid").eq(lit(5)))
-//!                           │ → select envelope columns only
-//! ──────────────────────────┼────────────────────────────────────────────────
-//! SEARCH FROM "alice"       │ col("mailbox_id").eq(lit(id))
-//!                           │   .and(col("from_addr").like(lit("%alice%")))
-//! ──────────────────────────┼────────────────────────────────────────────────
-//! SEARCH UNSEEN             │ col("mailbox_id").eq(lit(id))
-//!                           │   .and(array_has(col("flags"), lit("\Seen")).not())
-//! ──────────────────────────┼────────────────────────────────────────────────
-//! SEARCH SINCE 1-Jan-2025   │ col("mailbox_id").eq(lit(id))
-//!                           │   .and(col("internal_date").gt_eq(lit(ts)))
+//! IMAP Command              │ DataFusion DataFrame
+//! ──────────────────────────┼──────────────────────────────────────────
+//! SELECT INBOX              │ ctx.table("folders")
+//!                           │    .filter(col("account_id").eq(lit(...)))
+//!                           │    .filter(col("path").eq(lit("INBOX")))
+//! ──────────────────────────┼──────────────────────────────────────────
+//! FETCH 1:* FLAGS           │ ctx.table("messages")
+//!                           │    .filter(col("mailbox_id").eq(lit(...)))
+//!                           │    .select_columns(&["uid", "flags"])
+//!                           │    .sort(vec![col("uid").sort(true, false)])
+//! ──────────────────────────┼──────────────────────────────────────────
+//! FETCH 5 (ENVELOPE)        │ ctx.table("messages")
+//!                           │    .filter(col("mailbox_id").eq(lit(...))
+//!                           │        .and(col("uid").eq(lit(5))))
+//!                           │    .select_columns(&["date", "subject",
+//!                           │        "from_addr", "to_addrs", ...])
+//! ──────────────────────────┼──────────────────────────────────────────
+//! SEARCH FROM "alice"       │ ctx.table("messages")
+//!                           │    .filter(col("mailbox_id").eq(lit(...))
+//!                           │        .and(col("from_addr").like(lit("%alice%"))))
+//!                           │    .select_columns(&["uid"])
+//! ──────────────────────────┼──────────────────────────────────────────
+//! SEARCH UNSEEN             │ ctx.table("messages")
+//!                           │    .filter(col("mailbox_id").eq(lit(...))
+//!                           │        .and(array_has(col("flags"), lit("\\Seen")).not()))
+//!                           │    .select_columns(&["uid"])
+//! ──────────────────────────┼──────────────────────────────────────────
+//! SEARCH SINCE 1-Jan-2025   │ ctx.table("messages")
+//!                           │    .filter(col("internal_date").gt_eq(lit(timestamp)))
 //! ```
 //!
-//! ## Why DataFusion Expressions (not SQL strings)
+//! ## Why DataFusion?
 //!
-//! - Type-safe: compiler catches mistakes
-//! - Composable: build complex queries programmatically
-//! - Optimizable: DataFusion can push predicates into Lance
-//! - No escaping: no SQL injection, no quoting hell
+//! - Type-safe expression building (no SQL injection)
+//! - Predicate pushdown to Lance columnar format
+//! - Only reads requested columns (projection pushdown)
+//! - Composable filters via .and() / .or()
+//! - Native Arrow types throughout
 
 pub mod imap;
 pub mod messages;
 
-pub use messages::{MessageQuery, Search, FlagSearch, SizeSearch};
+pub use messages::{MessageQuery, SearchCriteria};

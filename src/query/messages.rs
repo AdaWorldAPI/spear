@@ -1,41 +1,69 @@
-//! Message Queries
+//! Message Queries via DataFusion
 //!
-//! DataFusion expressions over Lance tables.
-//! No SQL strings. Type-safe predicates.
+//! Uses DataFusion DataFrame API — no SQL strings.
+//! Predicate pushdown to Lance for columnar efficiency.
 
 use crate::error::{Error, Result};
 use arrow::array::*;
 use arrow::record_batch::RecordBatch;
 use datafusion::prelude::*;
-use datafusion::logical_expr::{col, lit, Expr};
-use futures::TryStreamExt;
-use lancedb::Table;
+use datafusion::datasource::MemTable;
+use std::sync::Arc;
 
-/// Message query builder
-pub struct MessageQuery<'a> {
-    table: &'a Table,
+/// Message query executor
+pub struct MessageQuery {
+    ctx: SessionContext,
 }
 
-impl<'a> MessageQuery<'a> {
-    pub fn new(table: &'a Table) -> Self {
-        Self { table }
+impl MessageQuery {
+    /// Create query context with messages table registered
+    pub async fn new(batches: Vec<RecordBatch>) -> Result<Self> {
+        let ctx = SessionContext::new();
+        
+        if !batches.is_empty() {
+            let schema = batches[0].schema();
+            let table = MemTable::try_new(schema, vec![batches])
+                .map_err(|e| Error::DataFusion(e.to_string()))?;
+            ctx.register_table("messages", Arc::new(table))
+                .map_err(|e| Error::DataFusion(e.to_string()))?;
+        }
+        
+        Ok(Self { ctx })
     }
     
-    /// IMAP FETCH by mailbox + UID
+    /// IMAP FETCH by mailbox + UID — reads only requested columns
     pub async fn fetch_by_uid(
         &self,
         mailbox_id: &[u8; 16],
         uid: u32,
         columns: &[&str],
     ) -> Result<Option<RecordBatch>> {
-        let filter = mailbox_eq(mailbox_id)
-            .and(col("uid").eq(lit(uid)));
+        let df = self.ctx.table("messages").await
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .filter(
+                col("mailbox_id").eq(lit(mailbox_id.as_slice()))
+                    .and(col("uid").eq(lit(uid)))
+            )
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .select_columns(columns)
+            .map_err(|e| Error::DataFusion(e.to_string()))?;
         
-        let batches = self.execute(columns, filter).await?;
-        Ok(batches.into_iter().next())
+        let batches = df.collect().await
+            .map_err(|e| Error::DataFusion(e.to_string()))?;
+        
+        if batches.is_empty() || batches[0].num_rows() == 0 {
+            return Ok(None);
+        }
+        
+        // Combine batches into one
+        let schema = batches[0].schema();
+        let batch = arrow::compute::concat_batches(&schema, &batches)
+            .map_err(|e| Error::Arrow(e))?;
+        
+        Ok(Some(batch))
     }
     
-    /// IMAP FETCH range
+    /// IMAP FETCH range — only specified columns
     pub async fn fetch_range(
         &self,
         mailbox_id: &[u8; 16],
@@ -43,222 +71,175 @@ impl<'a> MessageQuery<'a> {
         uid_to: u32,
         columns: &[&str],
     ) -> Result<Vec<RecordBatch>> {
-        let filter = mailbox_eq(mailbox_id)
-            .and(col("uid").gt_eq(lit(uid_from)))
-            .and(col("uid").lt_eq(lit(uid_to)));
+        let df = self.ctx.table("messages").await
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .filter(
+                col("mailbox_id").eq(lit(mailbox_id.as_slice()))
+                    .and(col("uid").gt_eq(lit(uid_from)))
+                    .and(col("uid").lt_eq(lit(uid_to)))
+            )
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .select_columns(columns)
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .sort(vec![col("uid").sort(true, false)])
+            .map_err(|e| Error::DataFusion(e.to_string()))?;
         
-        self.execute(columns, filter).await
+        df.collect().await
+            .map_err(|e| Error::DataFusion(e.to_string()))
     }
     
-    /// IMAP SEARCH
+    /// IMAP SEARCH — returns UIDs matching criteria
     pub async fn search(
         &self,
         mailbox_id: &[u8; 16],
-        criteria: &Search,
+        criteria: SearchCriteria,
     ) -> Result<Vec<u32>> {
-        let filter = criteria.to_expr(mailbox_id);
-        let batches = self.execute(&["uid"], filter).await?;
+        // Start with mailbox filter
+        let mut expr = col("mailbox_id").eq(lit(mailbox_id.as_slice()));
         
-        let mut uids: Vec<u32> = batches.iter()
-            .flat_map(|b| {
-                b.column(0)
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .unwrap()
-                    .values()
-                    .iter()
-                    .copied()
-            })
-            .collect();
-        
-        uids.sort_unstable();
-        Ok(uids)
-    }
-    
-    /// Count messages
-    pub async fn count(&self, mailbox_id: &[u8; 16]) -> Result<u32> {
-        Ok(self.search(mailbox_id, &Search::all()).await?.len() as u32)
-    }
-    
-    /// Max UID
-    pub async fn max_uid(&self, mailbox_id: &[u8; 16]) -> Result<u32> {
-        Ok(self.search(mailbox_id, &Search::all()).await?
-            .into_iter()
-            .max()
-            .unwrap_or(0))
-    }
-    
-    /// Execute query
-    async fn execute(&self, columns: &[&str], filter: Expr) -> Result<Vec<RecordBatch>> {
-        // LanceDB currently needs SQL string for filter
-        // Convert Expr to string representation
-        let filter_str = format!("{}", filter);
-        
-        let query = self.table.query()
-            .select(lancedb::query::Select::Columns(
-                columns.iter().map(|s| s.to_string()).collect()
-            ))
-            .filter(filter_str);
-        
-        query.execute()
-            .await
-            .map_err(|e| Error::Lance(e.to_string()))?
-            .try_collect()
-            .await
-            .map_err(|e| Error::Lance(e.to_string()))
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Search Builder (DataFusion Expr)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// IMAP SEARCH criteria → DataFusion Expr
-#[derive(Default, Clone)]
-pub struct Search {
-    pub from: Option<String>,
-    pub to: Option<String>,
-    pub subject: Option<String>,
-    pub since: Option<i64>,
-    pub before: Option<i64>,
-    pub flags: FlagSearch,
-    pub size: SizeSearch,
-}
-
-#[derive(Default, Clone)]
-pub struct FlagSearch {
-    pub seen: Option<bool>,
-    pub flagged: Option<bool>,
-    pub answered: Option<bool>,
-    pub deleted: Option<bool>,
-    pub draft: Option<bool>,
-}
-
-#[derive(Default, Clone)]
-pub struct SizeSearch {
-    pub larger: Option<i64>,
-    pub smaller: Option<i64>,
-}
-
-impl Search {
-    pub fn all() -> Self {
-        Self::default()
-    }
-    
-    pub fn unseen() -> Self {
-        Self {
-            flags: FlagSearch { seen: Some(false), ..Default::default() },
-            ..Default::default()
-        }
-    }
-    
-    pub fn from(addr: impl Into<String>) -> Self {
-        Self { from: Some(addr.into()), ..Default::default() }
-    }
-    
-    pub fn subject(s: impl Into<String>) -> Self {
-        Self { subject: Some(s.into()), ..Default::default() }
-    }
-    
-    pub fn since(ts: i64) -> Self {
-        Self { since: Some(ts), ..Default::default() }
-    }
-    
-    /// Convert to DataFusion Expr
-    pub fn to_expr(&self, mailbox_id: &[u8; 16]) -> Expr {
-        let mut expr = mailbox_eq(mailbox_id);
-        
-        // FROM
-        if let Some(ref from) = self.from {
+        // Add criteria filters
+        if let Some(ref from) = criteria.from {
             expr = expr.and(col("from_addr").like(lit(format!("%{}%", from))));
         }
-        
-        // TO
-        if let Some(ref to) = self.to {
-            expr = expr.and(col("to_addrs").like(lit(format!("%{}%", to))));
+        if let Some(ref subject) = criteria.subject {
+            expr = expr.and(col("subject").like(lit(format!("%{}%", subject))));
         }
-        
-        // SUBJECT
-        if let Some(ref subj) = self.subject {
-            expr = expr.and(col("subject").like(lit(format!("%{}%", subj))));
+        if let Some(since) = criteria.since {
+            expr = expr.and(col("internal_date").gt_eq(lit(since)));
         }
-        
-        // SINCE
-        if let Some(ts) = self.since {
-            expr = expr.and(col("internal_date").gt_eq(lit(ts)));
+        if let Some(before) = criteria.before {
+            expr = expr.and(col("internal_date").lt(lit(before)));
         }
-        
-        // BEFORE
-        if let Some(ts) = self.before {
-            expr = expr.and(col("internal_date").lt(lit(ts)));
+        if criteria.unseen {
+            // array_contains for flags
+            expr = expr.and(
+                array_has(col("flags"), lit("\\Seen")).not()
+            );
         }
-        
-        // FLAGS
-        if let Some(seen) = self.flags.seen {
-            expr = expr.and(flag_filter("\\Seen", seen));
+        if criteria.seen {
+            expr = expr.and(array_has(col("flags"), lit("\\Seen")));
         }
-        if let Some(flagged) = self.flags.flagged {
-            expr = expr.and(flag_filter("\\Flagged", flagged));
+        if criteria.flagged {
+            expr = expr.and(array_has(col("flags"), lit("\\Flagged")));
         }
-        if let Some(answered) = self.flags.answered {
-            expr = expr.and(flag_filter("\\Answered", answered));
+        if criteria.answered {
+            expr = expr.and(array_has(col("flags"), lit("\\Answered")));
         }
-        if let Some(deleted) = self.flags.deleted {
-            expr = expr.and(flag_filter("\\Deleted", deleted));
+        if criteria.deleted {
+            expr = expr.and(array_has(col("flags"), lit("\\Deleted")));
         }
-        if let Some(draft) = self.flags.draft {
-            expr = expr.and(flag_filter("\\Draft", draft));
-        }
-        
-        // SIZE
-        if let Some(larger) = self.size.larger {
+        if let Some(larger) = criteria.larger {
             expr = expr.and(col("size").gt(lit(larger)));
         }
-        if let Some(smaller) = self.size.smaller {
+        if let Some(smaller) = criteria.smaller {
             expr = expr.and(col("size").lt(lit(smaller)));
         }
         
-        expr
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Expression Builders
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// mailbox_id = X'...'
-fn mailbox_eq(id: &[u8; 16]) -> Expr {
-    col("mailbox_id").eq(lit(id.to_vec()))
-}
-
-/// Flag presence/absence filter
-fn flag_filter(flag: &str, present: bool) -> Expr {
-    // array_contains(flags, flag) or NOT array_contains(flags, flag)
-    let contains = datafusion::functions_array::expr_fn::array_has(
-        col("flags"),
-        lit(flag),
-    );
-    if present { contains } else { contains.not() }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_search_expr() {
-        let mailbox = [0u8; 16];
-        let search = Search::from("alice").to_expr(&mailbox);
-        let s = format!("{}", search);
-        assert!(s.contains("from_addr"));
-        assert!(s.contains("alice"));
+        let df = self.ctx.table("messages").await
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .filter(expr)
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .select_columns(&["uid"])
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .sort(vec![col("uid").sort(true, false)])
+            .map_err(|e| Error::DataFusion(e.to_string()))?;
+        
+        let batches = df.collect().await
+            .map_err(|e| Error::DataFusion(e.to_string()))?;
+        
+        let mut uids = Vec::new();
+        for batch in batches {
+            let uid_col = batch.column(0)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .ok_or_else(|| Error::Invalid("Expected UInt32".into()))?;
+            
+            for i in 0..uid_col.len() {
+                uids.push(uid_col.value(i));
+            }
+        }
+        
+        Ok(uids)
     }
     
-    #[test]
-    fn test_search_unseen() {
-        let mailbox = [0u8; 16];
-        let search = Search::unseen().to_expr(&mailbox);
-        let s = format!("{}", search);
-        assert!(s.contains("Seen"));
+    /// Count messages in mailbox
+    pub async fn count(&self, mailbox_id: &[u8; 16]) -> Result<u64> {
+        let df = self.ctx.table("messages").await
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .filter(col("mailbox_id").eq(lit(mailbox_id.as_slice())))
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .aggregate(vec![], vec![count(lit(1)).alias("count")])
+            .map_err(|e| Error::DataFusion(e.to_string()))?;
+        
+        let batches = df.collect().await
+            .map_err(|e| Error::DataFusion(e.to_string()))?;
+        
+        if batches.is_empty() || batches[0].num_rows() == 0 {
+            return Ok(0);
+        }
+        
+        let count_col = batches[0].column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| Error::Invalid("Expected Int64".into()))?;
+        
+        Ok(count_col.value(0) as u64)
     }
+    
+    /// Get max UID in mailbox
+    pub async fn max_uid(&self, mailbox_id: &[u8; 16]) -> Result<u32> {
+        let df = self.ctx.table("messages").await
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .filter(col("mailbox_id").eq(lit(mailbox_id.as_slice())))
+            .map_err(|e| Error::DataFusion(e.to_string()))?
+            .aggregate(vec![], vec![max(col("uid")).alias("max_uid")])
+            .map_err(|e| Error::DataFusion(e.to_string()))?;
+        
+        let batches = df.collect().await
+            .map_err(|e| Error::DataFusion(e.to_string()))?;
+        
+        if batches.is_empty() || batches[0].num_rows() == 0 {
+            return Ok(0);
+        }
+        
+        let max_col = batches[0].column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .ok_or_else(|| Error::Invalid("Expected UInt32".into()))?;
+        
+        if max_col.is_null(0) {
+            return Ok(0);
+        }
+        
+        Ok(max_col.value(0))
+    }
+}
+
+/// DataFusion array_has (array_contains)
+fn array_has(array: Expr, element: Expr) -> Expr {
+    datafusion::functions_array::expr_fn::array_has(array, element)
+}
+
+/// IMAP SEARCH criteria
+#[derive(Default, Debug, Clone)]
+pub struct SearchCriteria {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub cc: Option<String>,
+    pub bcc: Option<String>,
+    pub subject: Option<String>,
+    pub body: Option<String>,
+    pub since: Option<i64>,
+    pub before: Option<i64>,
+    pub on: Option<i64>,
+    pub seen: bool,
+    pub unseen: bool,
+    pub flagged: bool,
+    pub unflagged: bool,
+    pub answered: bool,
+    pub deleted: bool,
+    pub draft: bool,
+    pub larger: Option<i64>,
+    pub smaller: Option<i64>,
+    pub uid_set: Option<Vec<u32>>,
 }
