@@ -2,9 +2,9 @@
   "project": "spear",
   "phase": "1.0",
   "phase_name": "Core Storage",
-  "status": "ready",
+  "status": "compiling",
   "last_updated": "2026-03-06",
-  
+
   "completed": [
     "Repository structure",
     "Schema definitions (messages, folders, accounts, events, contacts)",
@@ -12,16 +12,18 @@
     "IMAP SEARCH parser",
     "Content store (SHA256-addressed)",
     "Architecture documentation",
-    "Integration plan"
+    "Integration plan",
+    "LanceDB 0.26 + DataFusion 52 + Arrow 57 compilation verified",
+    "Content store implementation with SHA256 and tests",
+    "All 9 unit tests passing"
   ],
-  
+
   "current_focus": [
-    "Verify LanceDB 0.23 compilation",
-    "Verify DataFusion 49 array functions",
     "Implement write operations",
-    "Integration tests"
+    "Integration tests",
+    "Clean up compiler warnings"
   ],
-  
+
   "blockers": [],
   
   "decisions": [
@@ -45,6 +47,13 @@
       "decision": "Separate content store (SHA256-addressed)",
       "rationale": "Bodies are large, opaque, read-once. Columnar doesn't help. Dedup via content-addressing.",
       "timestamp": "2026-03-06"
+    },
+    {
+      "id": "D004",
+      "topic": "Dependency versions",
+      "decision": "LanceDB 0.26, DataFusion 52, Arrow 57",
+      "rationale": "Original versions (LanceDB 0.23, DataFusion 49) not published. Updated to latest compatible set. datafusion-functions-array renamed to functions_nested in DF 52. LanceDB create_table now requires RecordBatchReader.",
+      "timestamp": "2026-03-06"
     }
   ],
   
@@ -66,7 +75,7 @@
   "metrics": {
     "tables_defined": 5,
     "columns_total": 80,
-    "tests_passing": 0,
-    "lines_of_code": 1143
+    "tests_passing": 9,
+    "lines_of_code": 1243
   }
 }
